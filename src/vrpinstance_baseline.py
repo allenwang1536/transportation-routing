@@ -1,6 +1,5 @@
 import numpy as np
 from math import sqrt
-from solver_runner import solve_instance
 
 class VRPInstance:
     numCustomers: int  # the number of customers
@@ -16,7 +15,16 @@ class VRPInstance:
         self.objective_value = 0
 
     def solve(self):
-        self.solution, self.objective_value, _ = solve_instance(self)
+        routes, unvisited = self.build_farthest_nearest_solution()
+
+        if unvisited:
+            routes, unvisited = self.build_best_fit_solution()
+
+        routes = [self.two_opt(route) for route in routes]
+        self.solution = self.format_solution(routes)
+        self.objective_value = round(
+            sum(self.route_distance(route) for route in routes), 2
+        )
 
         return self.solution, self.objective_value
 
