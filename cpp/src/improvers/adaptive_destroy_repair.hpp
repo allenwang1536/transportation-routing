@@ -2,6 +2,7 @@
 #include "../guidance/granular.hpp"
 #include "../guidance/tabu_memory.hpp"
 #include "../route_utils.hpp"
+#include "../shared_state.hpp"
 #include "../solver_config.hpp"
 #include <algorithm>
 #include <cmath>
@@ -231,17 +232,22 @@ inline void rememberReassignments(TabuMemory& tabu, const Routes& before, const 
 }
 
 // ── Main improve loop ─────────────────────────────────────────────────────────
+// state: optional shared pool for cooperative parallel search.  When non-null,
+//   every shareThreshold personal improvements the thread publishes its best
+//   and imports the global best if it's better (bidirectional sharing).
 inline Routes adaptiveDestroyRepairImprove(
     const VRPInstance& inst,
     const Routes& initialRoutes,
     const SolverConfig& config,
     RNG& rng,
-    double deadline)
+    double deadline,
+    SharedState* state = nullptr)
 {
     Routes current = cloneRoutes(initialRoutes);
     Routes best    = cloneRoutes(current);
     double currentObj = objective(inst, current);
     double bestObj    = currentObj;
+    int improveCount = 0;
 
     std::unordered_map<std::string, double> weights;
     for (const auto& op : DESTROY_OPERATORS) weights[op] = 1.0;
@@ -281,6 +287,22 @@ inline Routes adaptiveDestroyRepairImprove(
             bestObj = candidateObj;
             weights[op] += 5.0;
             accepted = true;
+
+            // Bidirectional sharing: publish our improvement, then check if
+            // another thread found something even better.
+            if (state) {
+                state->tryUpdate(best, bestObj);
+                if (++improveCount >= state->shareThreshold) {
+                    improveCount = 0;
+                    auto [sharedRoutes, sharedObj] = state->getBest();
+                    if (sharedObj < bestObj) {
+                        best      = sharedRoutes;
+                        bestObj   = sharedObj;
+                        current   = sharedRoutes;
+                        currentObj = sharedObj;
+                    }
+                }
+            }
         } else if (accepted && candidateObj < currentObj) {
             weights[op] += 1.0;
         } else {

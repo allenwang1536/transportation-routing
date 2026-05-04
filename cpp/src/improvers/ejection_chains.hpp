@@ -2,6 +2,7 @@
 #include "../guidance/granular.hpp"
 #include "../guidance/tabu_memory.hpp"
 #include "../route_utils.hpp"
+#include "../shared_state.hpp"
 #include "../solver_config.hpp"
 #include <limits>
 #include <memory>
@@ -130,12 +131,17 @@ inline Routes applyChain(const VRPInstance& inst, Routes routes, const ChainMove
     return routes;
 }
 
+// state: publish-only — improvements are emitted immediately so destroy_repair
+// threads can benefit.  Reading/restart from global best is handled by the
+// outer loop in parallel_solver (greedy descent converges fast, full restarts
+// are more useful than mid-run injection).
 inline Routes ejectionChainsImprove(
     const VRPInstance& inst,
     const Routes& initialRoutes,
     const SolverConfig& config,
     RNG& /*rng*/,
-    double deadline)
+    double deadline,
+    SharedState* state = nullptr)
 {
     Routes current = cloneRoutes(initialRoutes);
     double bestObj = objective(inst, current);
@@ -163,7 +169,10 @@ inline Routes ejectionChainsImprove(
 
         current = applyChain(inst, current, *move);
         currentObj = objective(inst, current);
-        if (currentObj < bestObj) bestObj = currentObj;
+        if (currentObj < bestObj) {
+            bestObj = currentObj;
+            if (state) state->tryUpdate(current, bestObj); // publish-only
+        }
 
         if (tabu) {
             tabu->forbidReverseMove(move->movedCustomer, move->sourceRoute, move->targetRoute);

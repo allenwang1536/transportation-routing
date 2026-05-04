@@ -2,6 +2,7 @@
 #include "../guidance/granular.hpp"
 #include "../guidance/tabu_memory.hpp"
 #include "../route_utils.hpp"
+#include "../shared_state.hpp"
 #include "../solver_config.hpp"
 #include <algorithm>
 #include <limits>
@@ -134,12 +135,14 @@ inline Routes applyMove(const VRPInstance& inst, Routes routes, const Move& move
     return routes;
 }
 
+// state: publish-only (same rationale as ejection_chains).
 inline Routes relocateSwapImprove(
     const VRPInstance& inst,
     const Routes& initialRoutes,
     const SolverConfig& config,
     RNG& /*rng*/,
-    double deadline)
+    double deadline,
+    SharedState* state = nullptr)
 {
     Routes current = cloneRoutes(initialRoutes);
     double bestObj = objective(inst, current);
@@ -167,7 +170,10 @@ inline Routes relocateSwapImprove(
 
         current = applyMove(inst, current, *move);
         currentObj = objective(inst, current);
-        if (currentObj < bestObj) bestObj = currentObj;
+        if (currentObj < bestObj) {
+            bestObj = currentObj;
+            if (state) state->tryUpdate(current, bestObj); // publish-only
+        }
 
         if (tabu) {
             if (move->kind == "relocate")
