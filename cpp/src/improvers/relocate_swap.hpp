@@ -6,6 +6,7 @@
 #include "../solver_config.hpp"
 #include <algorithm>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 
