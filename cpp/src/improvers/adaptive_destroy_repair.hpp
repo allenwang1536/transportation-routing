@@ -241,7 +241,8 @@ inline Routes adaptiveDestroyRepairImprove(
     const SolverConfig& config,
     RNG& rng,
     double deadline,
-    SharedState* state = nullptr)
+    SharedState* state = nullptr,
+    const ImprovementCallback* onImprovement = nullptr)
 {
     Routes current = cloneRoutes(initialRoutes);
     Routes best    = cloneRoutes(current);
@@ -287,6 +288,9 @@ inline Routes adaptiveDestroyRepairImprove(
             bestObj = candidateObj;
             weights[op] += 5.0;
             accepted = true;
+
+            if (onImprovement)
+                (*onImprovement)(best, bestObj);
 
             // Bidirectional sharing: publish our improvement, then check if
             // another thread found something even better.

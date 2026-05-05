@@ -4,6 +4,7 @@
 #include <cassert>
 #include <chrono>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <numeric>
 #include <optional>
@@ -18,6 +19,7 @@
 // ── Type aliases ─────────────────────────────────────────────────────────────
 using Routes   = std::vector<std::vector<int>>;
 using RouteMap = std::unordered_map<int, int>; // customer → vehicle index
+using ImprovementCallback = std::function<void(const Routes&, double)>;
 
 // ── Monotonic clock (mirrors Python's time.perf_counter) ─────────────────────
 inline double now() {

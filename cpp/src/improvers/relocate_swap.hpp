@@ -142,7 +142,8 @@ inline Routes relocateSwapImprove(
     const SolverConfig& config,
     RNG& /*rng*/,
     double deadline,
-    SharedState* state = nullptr)
+    SharedState* state = nullptr,
+    const ImprovementCallback* onImprovement = nullptr)
 {
     Routes current = cloneRoutes(initialRoutes);
     double bestObj = objective(inst, current);
@@ -172,6 +173,8 @@ inline Routes relocateSwapImprove(
         currentObj = objective(inst, current);
         if (currentObj < bestObj) {
             bestObj = currentObj;
+            if (onImprovement)
+                (*onImprovement)(current, bestObj);
             if (state) state->tryUpdate(current, bestObj); // publish-only
         }
 

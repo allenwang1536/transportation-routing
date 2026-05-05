@@ -4,6 +4,7 @@
 #include <cassert>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <vector>
 
 // ── Individual ────────────────────────────────────────────────────────────────
@@ -65,11 +66,26 @@ public:
 
     const Individual& operator[](int i) const { return individuals_[i]; }
 
+    const std::vector<Individual>& individuals() const { return individuals_; }
+
     const Individual& best() const {
         return *std::min_element(individuals_.begin(), individuals_.end(),
             [](const Individual& a, const Individual& b) {
                 return a.objective < b.objective;
             });
+    }
+
+    double minDistanceTo(const Routes& routes) const {
+        double minD = std::numeric_limits<double>::infinity();
+        for (const auto& ind : individuals_)
+            minD = std::min(minD, distance(routes, ind.routes, numCustomers_));
+        return minD;
+    }
+
+    std::optional<Individual> qualityDiversitySample(RNG& rng, int tournamentSize = 6) const {
+        if (individuals_.empty()) return std::nullopt;
+        int idx = selectIdx(rng, std::min(tournamentSize, (int)individuals_.size()));
+        return individuals_[idx];
     }
 
     // ── Diversity metric: normalized broken-pairs distance ────────────────────
@@ -96,13 +112,6 @@ private:
 
     int randomIdx(RNG& rng) const {
         return std::uniform_int_distribution<int>(0, (int)individuals_.size() - 1)(rng.gen);
-    }
-
-    double minDistanceTo(const Routes& routes) const {
-        double minD = std::numeric_limits<double>::infinity();
-        for (const auto& ind : individuals_)
-            minD = std::min(minD, distance(routes, ind.routes, numCustomers_));
-        return minD;
     }
 
     // Recompute biasedFitness = fitnessRank + diversityRank for all individuals.
