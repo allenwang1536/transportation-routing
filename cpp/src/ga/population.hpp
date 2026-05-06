@@ -82,6 +82,28 @@ public:
         return minD;
     }
 
+    // Average pairwise broken-pairs distance across all individuals (0 if < 2).
+    double avgPairwiseDiversity() const {
+        int n = (int)individuals_.size();
+        if (n < 2) return 0.0;
+        double total = 0.0;
+        int pairs = 0;
+        for (int i = 0; i < n; ++i)
+            for (int j = i + 1; j < n; ++j) {
+                total += distance(individuals_[i].routes, individuals_[j].routes, numCustomers_);
+                ++pairs;
+            }
+        return pairs > 0 ? total / pairs : 0.0;
+    }
+
+    double worstObjective() const {
+        if (individuals_.empty()) return std::numeric_limits<double>::infinity();
+        return std::max_element(individuals_.begin(), individuals_.end(),
+            [](const Individual& a, const Individual& b) {
+                return a.objective < b.objective;
+            })->objective;
+    }
+
     std::optional<Individual> qualityDiversitySample(RNG& rng, int tournamentSize = 6) const {
         if (individuals_.empty()) return std::nullopt;
         int idx = selectIdx(rng, std::min(tournamentSize, (int)individuals_.size()));

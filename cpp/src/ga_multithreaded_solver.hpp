@@ -2,6 +2,7 @@
 #include "constructors/farthest_nearest.hpp"
 #include "constructors/regret_bidding.hpp"
 #include "ga/crossover.hpp"
+#include "ga/diagnostics.hpp"
 #include "ga/population.hpp"
 #include "improvers/adaptive_destroy_repair.hpp"
 #include "improvers/ejection_chains.hpp"
@@ -72,11 +73,37 @@ public:
     SharedGAPool(int minSize, int maxSize, int numCustomers, double tau)
         : population_(minSize, maxSize, numCustomers), tau_(tau) {}
 
-    bool insertCandidate(const Routes& routes, double obj, PoolInsertSource source) {
+    bool insertCandidate(const Routes& routes, double obj, PoolInsertSource source,
+                         DiagnosticsLogger* logger = nullptr, int workerId = -1) {
         std::lock_guard<std::mutex> lk(mtx_);
+        // Compute diversity score before insertion so it reflects distance to current pool.
+        double divScore  = population_.empty() ? 1.0 : population_.minDistanceTo(routes);
+        double bestObj   = population_.empty() ? std::numeric_limits<double>::infinity()
+                                               : population_.best().objective;
         bool accepted = population_.tryInject({normalizeRoutes(routes, numVehicles_), obj}, tau_);
         incrementInsertStats(source, accepted);
+        if (logger) {
+            std::string src;
+            if      (source == PoolInsertSource::Migrant)
+                src = (workerId >= 0) ? "worker_" + std::to_string(workerId) : "worker";
+            else if (source == PoolInsertSource::Child)
+                src = "hgs_child";
+            else
+                src = "seed";
+            logger->logInjection(src, accepted, divScore, obj, bestObj);
+        }
         return accepted;
+    }
+
+    // For population snapshots (called periodically from the GA thread).
+    void takeSnapshot(DiagnosticsLogger& logger) const {
+        std::lock_guard<std::mutex> lk(mtx_);
+        if (population_.empty()) return;
+        logger.logPopSnapshot(
+            population_.size(),
+            population_.avgPairwiseDiversity(),
+            population_.best().objective,
+            population_.worstObjective());
     }
 
     void setNumVehicles(int numVehicles) {
@@ -235,11 +262,14 @@ inline void gaMtPublishIfImproved(
     SharedGAPool* pool,
     const Routes& routes,
     double obj,
-    double& lastPushedObj)
+    double& lastPushedObj,
+    DiagnosticsLogger* logger = nullptr,
+    int workerId = -1)
 {
     if (!pool) return;
     if (obj + 1e-9 < lastPushedObj) {
-        pool->insertCandidate(routes, obj, PoolInsertSource::Migrant);
+        pool->insertCandidate(routes, obj, PoolInsertSource::Migrant, logger, workerId);
+        if (logger) logger->logWorkerPush(workerId, routes, obj);
         lastPushedObj = obj;
     }
 }
@@ -250,7 +280,8 @@ inline void gaMtWorkerRun(
     const GaMtOptions& opts,
     SharedGAPool* pool,
     WorkerResult& result,
-    double deadline)
+    double deadline,
+    DiagnosticsLogger* logger = nullptr)
 {
     pinGaMtThreadToCore(workerId);
 
@@ -265,7 +296,7 @@ inline void gaMtWorkerRun(
     Routes personalBest = current;
     double personalBestObj = objective(inst, personalBest);
     double lastPushedObj = std::numeric_limits<double>::infinity();
-    gaMtPublishIfImproved(pool, personalBest, personalBestObj, lastPushedObj);
+    gaMtPublishIfImproved(pool, personalBest, personalBestObj, lastPushedObj, logger, workerId);
 
     while (now() < deadline) {
         double cycleDeadline = std::min(now() + opts.migrationInterval, deadline);
@@ -275,7 +306,7 @@ inline void gaMtWorkerRun(
                 personalBest = normalizeRoutes(routes, inst.numVehicles);
                 personalBestObj = obj;
             }
-            gaMtPublishIfImproved(pool, routes, obj, lastPushedObj);
+            gaMtPublishIfImproved(pool, routes, obj, lastPushedObj, logger, workerId);
         };
 
         Routes improved;
@@ -297,7 +328,7 @@ inline void gaMtWorkerRun(
                 personalBest = improved;
                 personalBestObj = improvedObj;
             }
-            gaMtPublishIfImproved(pool, improved, improvedObj, lastPushedObj);
+            gaMtPublishIfImproved(pool, improved, improvedObj, lastPushedObj, logger, workerId);
         }
 
         current = personalBest;
@@ -349,11 +380,15 @@ inline void gaMtGaRun(
     const VRPInstance& inst,
     const GaMtOptions& opts,
     SharedGAPool& pool,
-    double deadline)
+    double deadline,
+    DiagnosticsLogger* logger = nullptr)
 {
     pinGaMtThreadToCore(3);
     RNG rng(opts.seed + 9'000'021);
     gaMtSeedPool(pool, inst, opts.popMin, deadline, rng);
+
+    double lastSnapshot = now();
+    const double snapshotInterval = 5.0; // seconds between population snapshots
 
     while (now() < deadline) {
         if (pool.size() < 2) {
@@ -371,11 +406,17 @@ inline void gaMtGaRun(
         child = normalizeRoutes(child, inst.numVehicles);
         if (validateRoutes(inst, child)) continue;
 
-        pool.insertCandidate(child, objective(inst, child), PoolInsertSource::Child);
+        pool.insertCandidate(child, objective(inst, child), PoolInsertSource::Child, logger);
+
+        if (logger && now() - lastSnapshot >= snapshotInterval) {
+            pool.takeSnapshot(*logger);
+            lastSnapshot = now();
+        }
     }
 }
 
-inline GaMtResult gaMtSolve(const VRPInstance& inst, const GaMtOptions& opts) {
+inline GaMtResult gaMtSolve(const VRPInstance& inst, const GaMtOptions& opts,
+                            DiagnosticsLogger* logger = nullptr) {
     double deadline = now() + opts.timeLimit;
 
     std::unique_ptr<SharedGAPool> pool;
@@ -397,12 +438,13 @@ inline GaMtResult gaMtSolve(const VRPInstance& inst, const GaMtOptions& opts) {
             std::cref(opts),
             pool.get(),
             std::ref(workers[workerId]),
-            deadline);
+            deadline,
+            logger);
     }
 
     if (pool) {
         threads.emplace_back(gaMtGaRun, std::cref(inst), std::cref(opts),
-                             std::ref(*pool), deadline);
+                             std::ref(*pool), deadline, logger);
     }
 
     for (auto& thread : threads) thread.join();
