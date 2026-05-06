@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Benchmark the standalone single-threaded HGS solver on one instance.
+"""Benchmark the standalone single-threaded HGS solver across one or many instances.
 
 Produces a CSV with the same schema as ga_multithreading_results / full_5min
 so results can be compared directly.  Threading/migration columns are all 0
 because ga_solver runs a single thread with no worker interaction.
 
 Run from the repo root:
-    python experiments/run_hgs_standalone.py                    # 300 s, 386_47_1.vrp
-    python experiments/run_hgs_standalone.py --time-limit 10    # quick smoke-check
-    python experiments/run_hgs_standalone.py --no-compile       # skip recompile
+    python experiments/run_hgs_standalone.py                          # all 16 inputs, 300 s each
+    python experiments/run_hgs_standalone.py --instances 386_47_1.vrp # single instance
+    python experiments/run_hgs_standalone.py --time-limit 10          # quick smoke-check (still all instances)
+    python experiments/run_hgs_standalone.py --no-compile             # skip recompile
 """
 
 import argparse
@@ -135,13 +136,40 @@ def output_path(root: Path, requested: str | None) -> Path:
     return root / "experiments" / f"hgs_standalone_5min_{stamp}.csv"
 
 
+def instance_sort_key(path: Path) -> tuple[int, str]:
+    try:
+        return (int(path.stem.split("_")[0]), path.name)
+    except ValueError:
+        return (10**9, path.name)
+
+
+def resolve_instances(root: Path, requested: list[str] | None) -> list[Path]:
+    input_dir = root / "input"
+    if not requested:
+        return sorted(input_dir.glob("*.vrp"), key=instance_sort_key)
+
+    resolved: list[Path] = []
+    for item in requested:
+        path = Path(item)
+        if not path.is_absolute():
+            candidate = root / item
+            if candidate.exists():
+                path = candidate
+            else:
+                path = input_dir / item
+        if not path.exists():
+            raise FileNotFoundError(f"instance not found: {item}")
+        resolved.append(path)
+    return sorted(resolved, key=instance_sort_key)
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--instance",    default="input/386_47_1.vrp",
-                   help="path to .vrp file (relative to repo root)")
+    p.add_argument("--instances",   nargs="+", default=None,
+                   help="instance filenames or paths (default: all input/*.vrp)")
     p.add_argument("--time-limit",  type=float, default=300.0,
-                   help="solver time limit in seconds (default 300)")
+                   help="solver time limit in seconds per instance (default 300)")
     p.add_argument("--seed",        type=int, default=42)
     p.add_argument("--output",      default=None,
                    help="output CSV path (default: auto-timestamped in experiments/)")
@@ -157,35 +185,39 @@ def main() -> int:
     if not args.no_compile:
         compile_solver(root)
 
-    instance = root / args.instance
-    if not instance.exists():
-        print(f"Error: instance not found: {instance}", file=sys.stderr)
+    try:
+        instances = resolve_instances(root, args.instances)
+    except FileNotFoundError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    if not instances:
+        print("No instances found.", file=sys.stderr)
         return 1
 
     out = output_path(root, args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Writing benchmark rows to {out}")
 
-    row = run_hgs(root, instance, time_limit=args.time_limit, seed=args.seed)
-
+    rows: list[dict[str, Any]] = []
     with open(out, "w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
         writer.writeheader()
-        writer.writerow(row)
+        for instance in instances:
+            print(
+                f"Running hgs_standalone on {instance.name} "
+                f"({args.time_limit:.0f}s)...",
+                flush=True,
+            )
+            row = run_hgs(root, instance, time_limit=args.time_limit, seed=args.seed)
+            writer.writerow(row)
+            fh.flush()
+            rows.append(row)
+            status = "OK" if not row["error"] else f"ERROR: {row['error']}"
+            print(f"  {instance.name}: objective={row['objective']} "
+                  f"valid={row['valid']} runtime={row['runtime']}s [{status}]")
 
-    print(f"\nResult: instance={row['instance']}  model={row['model']}  "
-          f"objective={row['objective']}  valid={row['valid']}  "
-          f"runtime={row['runtime']}s")
-    print(f"Saved → {out}")
-
-    # Quick comparison against known full_5min results for 386_47_1.vrp
-    if "386_47_1" in str(instance):
-        print("\nComparison (386_47_1.vrp, 300 s, seed 42):")
-        print(f"  hgs_standalone (this run): {row['objective']}")
-        print(f"  independent  (4-thread, no sharing): 25584.49")
-        print(f"  one_way      (workers → GA):          25934.67")
-        print(f"  bidirectional (full exchange):         24929.19")
-
-    return 0 if not row["error"] else 1
+    print(f"\nDone. Results: {out}")
+    return 0 if all(not r["error"] for r in rows) else 1
 
 
 if __name__ == "__main__":
